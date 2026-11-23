@@ -3,204 +3,155 @@ package com.buddy1.assistant
 
 import android.Manifest
 import android.app.Activity
-import android.app.AlarmClock
+import android.app.TimePickerDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.provider.AlarmClock
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
-import android.view.Gravity
-import android.widget.*
-import android.graphics.Color
-import android.graphics.Typeface
-import android.text.InputType
-import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
-import kotlin.concurrent.thread
 
-class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private lateinit var output: TextView
     private lateinit var input: EditText
+    private lateinit var apiKey: EditText
     private lateinit var tts: TextToSpeech
-    private var apiKey = ""
-    private var language = "en-US"
+    private var speechRecognizer: SpeechRecognizer? = null
 
-    private val micPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-            if (it) listen()
-        }
-
-    private val speech =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            if (it.resultCode == Activity.RESULT_OK) {
-                val words = it.data?.getStringArrayListExtra(
-                    RecognizerIntent.EXTRA_RESULTS
-                )?.firstOrNull()
-
-                if (!words.isNullOrBlank()) {
-                    input.setText(words)
-                    sendMessage(words)
-                }
-            }
-        }
+    private val prefs by lazy {
+        getSharedPreferences("Buddy1Settings", MODE_PRIVATE)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        apiKey = getPreferences(MODE_PRIVATE)
-            .getString("api_key", "") ?: ""
 
         tts = TextToSpeech(this, this)
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(20, 30, 20, 20)
-            setBackgroundColor(Color.rgb(5, 10, 25))
+            setPadding(24, 24, 24, 24)
         }
 
-        val title = TextView(this).apply {
-            text = "B U D D Y 1"
+        val scroll = ScrollView(this)
+        scroll.addView(layout)
+
+        val heading = TextView(this).apply {
+            text = "BUDDY1"
             textSize = 30f
-            gravity = Gravity.CENTER
-            setTextColor(Color.CYAN)
-            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 10, 0, 20)
         }
+        layout.addView(heading)
 
-        val subtitle = TextView(this).apply {
-            text = "YOUR PERSONAL AI ASSISTANT"
-            gravity = Gravity.CENTER
-            setTextColor(Color.LTGRAY)
+        apiKey = EditText(this).apply {
+            hint = "Enter Gemini API Key"
+            setText(prefs.getString("api_key", ""))
+        }
+        layout.addView(apiKey)
+
+        addButton(layout, "Save API Key") {
+            prefs.edit().putString("api_key", apiKey.text.toString().trim()).apply()
+            Toast.makeText(this, "API Key Saved", Toast.LENGTH_SHORT).show()
         }
 
         output = TextView(this).apply {
-            text = "BUDDY1: Hello! I am ready to help you."
-            textSize = 17f
-            setTextColor(Color.WHITE)
-            setPadding(12, 15, 12, 15)
+            text = "Hello! I am Buddy1. How can I help you?"
+            textSize = 18f
+            setPadding(0, 25, 0, 25)
         }
-
-        val scroll = ScrollView(this).apply {
-            addView(output)
-        }
+        layout.addView(output)
 
         input = EditText(this).apply {
-            hint = "Talk to BUDDY1..."
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            setPadding(12, 12, 12, 12)
+            hint = "Type your message..."
+            minLines = 2
         }
-
-        val send = Button(this).apply {
-            text = "SEND"
-            setOnClickListener {
-                sendMessage(input.text.toString())
-            }
-        }
-
-        val mic = Button(this).apply {
-            text = "🎙 SPEAK"
-            setOnClickListener {
-                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                    == PackageManager.PERMISSION_GRANTED) {
-                    listen()
-                } else {
-                    micPermission.launch(Manifest.permission.RECORD_AUDIO)
-                }
-            }
-        }
-
-        val lang = Button(this).apply {
-            text = "ENGLISH / हिंदी"
-            setOnClickListener {
-                language = if (language == "en-US") "hi-IN" else "en-US"
-                Toast.makeText(
-                    this@MainActivity,
-                    "Language changed",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        }
-
-        val key = Button(this).apply {
-            text = "ADD GEMINI API KEY"
-            setOnClickListener { showKeyDialog() }
-        }
-
-        layout.addView(title)
-        layout.addView(subtitle)
-        layout.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         layout.addView(input)
-        layout.addView(send)
-        layout.addView(mic)
-        layout.addView(lang)
-        layout.addView(key)
 
-        setContentView(layout)
+        addButton(layout, "Send Message") {
+            val message = input.text.toString().trim()
+            if (message.isNotEmpty()) {
+                askGemini(message)
+            }
+        }
+
+        addButton(layout, "Speak to Buddy1") {
+            startVoiceRecognition()
+        }
+
+        addButton(layout, "Open YouTube") {
+            openApp("com.google.android.youtube")
+        }
+
+        addButton(layout, "Open Phone Settings") {
+            startActivity(Intent(android.provider.Settings.ACTION_SETTINGS))
+        }
+
+        addButton(layout, "Set Alarm") {
+            TimePickerDialog(
+                this,
+                { _, hour, minute ->
+                    val alarmIntent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                        putExtra(AlarmClock.EXTRA_HOUR, hour)
+                        putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                        putExtra(AlarmClock.EXTRA_MESSAGE, "Alarm set by Buddy1")
+                    }
+                    startActivity(alarmIntent)
+                },
+                7,
+                0,
+                false
+            ).show()
+        }
+
+        setContentView(scroll)
     }
 
-    private fun listen() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+    private fun addButton(
+        layout: LinearLayout,
+        label: String,
+        action: () -> Unit
+    ) {
+        val button = Button(this).apply {
+            text = label
+            setOnClickListener { action() }
+        }
+        layout.addView(
+            button,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-        }
-
-        try {
-            speech.launch(intent)
-        } catch (e: Exception) {
-            Toast.makeText(this, "Voice not available", Toast.LENGTH_SHORT).show()
-        }
+        )
     }
 
-    private fun sendMessage(message: String) {
-        val text = message.trim()
-        if (text.isEmpty()) return
+    private fun askGemini(message: String) {
+        val key = apiKey.text.toString().trim()
 
-        input.setText("")
-        output.append("\n\nYOU: $text")
-
-        when {
-            text.contains("open youtube", true) -> {
-                startActivity(Intent(
-                    Intent.ACTION_VIEW,
-                    android.net.Uri.parse("https://youtube.com")
-                ))
-                reply("Opening YouTube.")
-                return
-            }
-
-            text.contains("open settings", true) -> {
-                startActivity(Intent(android.provider.Settings.ACTION_SETTINGS))
-                reply("Opening phone settings.")
-                return
-            }
-
-            text.contains("set alarm", true) -> {
-                startActivity(Intent(AlarmClock.ACTION_SET_ALARM))
-                reply("Please choose your alarm time.")
-                return
-            }
-        }
-
-        if (apiKey.isBlank()) {
-            reply("Please add your Gemini API key first.")
+        if (key.isEmpty()) {
+            output.text = "Please enter and save your Gemini API key first."
             return
         }
 
-        output.append("\n\nBUDDY1: Thinking...")
+        output.text = "Buddy1 is thinking..."
 
-        thread {
+        Thread {
             try {
                 val url = URL(
-                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey"
+                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
                 )
 
                 val connection = url.openConnection() as HttpURLConnection
@@ -208,9 +159,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 connection.connectTimeout = 20000
                 connection.readTimeout = 30000
                 connection.doOutput = true
-                connection.setRequestProperty(
-                    "Content-Type", "application/json"
-                )
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.setRequestProperty("x-goog-api-key", key)
 
                 val body = JSONObject().apply {
                     put(
@@ -221,7 +171,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                                 JSONArray().put(
                                     JSONObject().put(
                                         "text",
-                                        "You are BUDDY1, a helpful AI assistant. Reply in the user's language, Hindi or English. Be friendly and truthful. User says: $text"
+                                        "You are Buddy1, a helpful Android AI assistant. Reply naturally in Hindi or English according to the user's language.\n\n$message"
                                     )
                                 )
                             )
@@ -230,21 +180,25 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 }
 
                 connection.outputStream.use {
-                    it.write(body.toString().toByteArray())
+                    it.write(body.toString().toByteArray(Charsets.UTF_8))
                 }
 
-                val code = connection.responseCode
-                val stream = if (code in 200..299)
-                    connection.inputStream else connection.errorStream
+                val responseCode = connection.responseCode
+                val stream = if (responseCode in 200..299) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream
+                }
 
-                val response = stream.bufferedReader().use { it.readText() }
+                val responseText = stream.bufferedReader().use { it.readText() }
                 connection.disconnect()
 
-                if (code !in 200..299) {
-                    throw Exception("API error $code")
+                if (responseCode !in 200..299) {
+                    throw Exception("Gemini API error $responseCode: $responseText")
                 }
 
-                val answer = JSONObject(response)
+                val json = JSONObject(responseText)
+                val answer = json
                     .getJSONArray("candidates")
                     .getJSONObject(0)
                     .getJSONObject("content")
@@ -252,63 +206,133 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     .getJSONObject(0)
                     .getString("text")
 
-                runOnUiThread { reply(answer) }
+                runOnUiThread {
+                    output.text = answer
+                    speak(answer)
+                }
 
             } catch (e: Exception) {
                 runOnUiThread {
-                    reply("Connection error. Please check internet and API key.")
+                    output.text = "Error: ${e.message}"
                 }
             }
-        }
+        }.start()
     }
 
-    private fun reply(message: String) {
-        output.append("\n\nBUDDY1: $message")
-        tts.speak(
-            message,
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            "buddy1"
-        )
-    }
-
-    private fun showKeyDialog() {
-        val field = EditText(this).apply {
-            hint = "Paste Gemini API key"
-            inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(apiKey)
+    private fun startVoiceRecognition() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(
+                this,
+                "Speech recognition is not available",
+                Toast.LENGTH_LONG
+            ).show()
+            return
         }
 
-        android.app.AlertDialog.Builder(this)
-            .setTitle("BUDDY1 API KEY")
-            .setView(field)
-            .setPositiveButton("SAVE") { _, _ ->
-                apiKey = field.text.toString().trim()
-                getPreferences(MODE_PRIVATE).edit()
-                    .putString("api_key", apiKey)
-                    .apply()
-                Toast.makeText(
-                    this,
-                    "API key saved",
-                    Toast.LENGTH_SHORT
-                ).show()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                101
+            )
+            return
+        }
+
+        speechRecognizer?.destroy()
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+
+        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                output.text = "Listening..."
             }
-            .setNegativeButton("CANCEL", null)
-            .show()
+
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+
+            override fun onError(error: Int) {
+                output.text = "Voice recognition error. Please try again."
+            }
+
+            override fun onResults(results: Bundle?) {
+                val words = results?.getStringArrayList(
+                    SpeechRecognizer.RESULTS_RECOGNITION
+                )
+                val message = words?.firstOrNull()
+
+                if (!message.isNullOrBlank()) {
+                    input.setText(message)
+                    askGemini(message)
+                }
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+        }
+
+        speechRecognizer?.startListening(intent)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == 101 &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
+            startVoiceRecognition()
+        } else if (requestCode == 101) {
+            Toast.makeText(
+                this,
+                "Microphone permission is needed",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    private fun speak(text: String) {
+        if (::tts.isInitialized) {
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "buddy1_speech")
+        }
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            tts.language = Locale.US
-            tts.setPitch(0.80f)
-            tts.setSpeechRate(0.90f)
+            tts.language = Locale("en", "IN")
+        }
+    }
+
+    private fun openApp(packageName: String) {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+
+        if (launchIntent != null) {
+            startActivity(launchIntent)
+        } else {
+            Toast.makeText(this, "App not found", Toast.LENGTH_SHORT).show()
         }
     }
 
     override fun onDestroy() {
-        tts.shutdown()
+        speechRecognizer?.destroy()
+        if (::tts.isInitialized) {
+            tts.stop()
+            tts.shutdown()
+        }
         super.onDestroy()
     }
 }
-
